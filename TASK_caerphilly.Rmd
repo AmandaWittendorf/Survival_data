@@ -1,0 +1,369 @@
+---
+title: "TASK (dataset: caerphilly)"
+author: "Amanda Wittendorf"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r Pre-setting_plots, message=FALSE, warning=FALSE, include=FALSE}
+# PRE-SETTING FOR THEMES IN PLOTS 
+library(ggplot2)
+
+standard_tema <- theme_minimal(base_size = 11, base_family = "sans") + 
+  theme(
+    plot.title = element_text(face = "bold", 
+                              size = rel(1.2), 
+                              color = "#333333"), 
+    plot.subtitle = element_text(face = "italic", 
+                                 size = rel(0.95), 
+                                 color = "#555555"), 
+    axis.title = element_text(size = rel(0.9)), 
+    axis.text = element_text(size = rel(0.85)), 
+    legend.position = "bottom"
+  )
+
+# Set as global standard-theme
+theme_set(standard_tema)
+```
+
+## 1. DESKRIPTION ON THE DATASET
+
+The dataset is from the pack `statistisk` and contains measurements Myocardial infarction (MI). More specifically: 
+
+- $\text{id}$:        Individuals ID-number 
+
+- $\text{birthdate}$: Date of birth (Eksempel: 1910-04-10)
+
+- $\text{examdate}$:  Date of first examination (Eksempel: 1980-02-21)
+
+- $\text{dthdate}$:   Date of death (Eksempel: NA)
+
+- $\text{midate}$:    Date of first MI (Eksempel: 1996-02-09)
+
+- $\text{emdate}$:    Date of emigration (Eksempel: NA)
+
+- $\text{eosdate}$:   End of study (Eksempel: 1999-02-14)
+
+- $\text{socclass}$:  Social class based upon The Registrar General's Social Class Scale (=RGSC) in Britian  (I / II / IIINM / IIIM / IV / V)
+  - I: Professional occupations (e.g. doctors, layers, etc.)
+  - II: Managerial and technical / Intermediate (e.g. nurses, pilots, etc.)
+  - IIINM: Skilled non-manual occupations (e.g. receptionist, clerical staff etc.)
+  - IIIM: Skilled manual occupations (e.g. bus drivers, hairdresser, etc.)
+  - IV: 	Partly skilled occupations (e.g. bartender, janitor, etc.)
+  - V: 	Unskilled occupations (e.g. cleaners, piccolo, etc.)
+  
+- $\text{diabetes}$:  Diabetes status (No/uncertain / Yes)
+
+- $\text{smoking}$:   Smoking status 
+                      (<15 per day / Never smoked / Ex>5 years / Ex 1-4 years / >15 per day)  
+
+- $\text{fibrin}$:    Fibrinogen at baseline
+
+- $\text{totchol}$:   Total cholesterol at baseline
+
+- $\text{hdlchol}$:   HDL cholesterol at baseline
+
+- $\text{bpsyst}$:    Systolic blood pressure
+
+- $\text{bpdias}$:    Diastolic blood pressure
+
+- $\text{bmi}$:       Body mass index (kg/m2)
+
+- $\text{logtrig}$:   Log (base 10) triglycerides
+
+
+```{r dataset, message=FALSE, include=FALSE}
+library(statistik)
+library(survival)
+
+# Dataset
+caer <- Caerphilly |> 
+  mutate(socclass = factor(socclass),
+         diabetes = factor(diabetes),
+         smoking = factor(smoking)
+  )
+```
+
+
+## 2. DATA MANAGEMENT 
+
+### 2.1. Definition of Follow-up and Endpoints
+
+To perform an analysis on survival data following variables need to be constructed:
+
+1. **The date of study exit** due to 
+  (a) MI, 
+  (b) death, 
+  (c) emigration, or 
+  (d) end-of-study
+
+2. **Status variable** indicating whether or not the individual experienced an MI prior to exit. 
+
+3. **Time variable** describing how many years an individual remains in the study before exiting. 
+
+Death, emigration, and end-of-study are all going to be treated as censoring events.  
+
+```{r new_variables, echo=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+library(kableExtra) 
+
+caer <- caer |> 
+  # Item 1
+  mutate(date_out = pmin(dthdate, emdate, eosdate, midate, 
+                         na.rm = TRUE),
+  # Item 2 
+         status = case_when(
+           date_out == midate ~ "MI",
+           .default = "Censored"),    # <- Censoring events
+         status = factor(status)
+         ) |> 
+  
+  # Item 3
+  mutate(time_study = difftime(date_out, examdate, units = "days"),
+         time_study = as.numeric(time_study) / 365.25)
+
+# Print 
+select(caer,  
+       id, status, examdate, midate, dthdate, emdate, eosdate, date_out, time_study) |>
+  as.tibble() |> 
+  head(8) |> 
+  rename("ID" = id,
+         "MI (midate)" = midate,
+         "Death (dthdate)" = dthdate,
+         "Emigration (emdate)" = emdate,
+         "End-of-study (eosdate)" = eosdate,
+         "First examination (examdate)" = examdate,
+         "Event (date_out)" = date_out,
+         "Time in years (time_study)" = time_study,
+         "Status variabel (status)" = status) |> 
+  kable(format = "html", align = "lr", , digits = 2,
+        caption = "Table 2.1: Key timeline events and follow-up dates (n = 8)") |> 
+  kable_classic(full_width = FALSE, html_font = "Cambria")
+```
+
+
+### 2.2. Definition of Time-at-Risk and Age at inclusion (years)
+
+Time-at-Risk is calculated for each person and is defined as how much risk time they contribute, and whether they experienced the MI event using `pyears` while Age at inclusion is being recoded to be a numeric variable.
+
+```{r time_at_risk, echo=FALSE, message=FALSE, warning=FALSE}
+# Time-at-Risk
+py <- pyears(Surv(time_study, status == "MI") ~ id,
+             scale = 1,
+             data.frame = TRUE,
+             data = caer)
+
+caer <- py$data |>
+  select(-n) |>
+  right_join(caer, by = "id") |>
+  as_tibble()
+
+# Age at inclusion
+caer <- caer |> 
+  mutate(age_exam = difftime(examdate, birthdate, units = "days"),
+                        age_exam = as.numeric(age_exam) / 365.25)
+
+# Print
+select(caer, 
+       id, pyears, age_exam, event) |> 
+  as.tibble() |> 
+  head(8) |> 
+  rename("ID" = id,
+         "Person-Years (pyears)" = pyears,
+         "Age at inclusion (age_exam)" = age_exam,
+         "Event of MI (event)" = event
+         ) |> 
+  kable(format = "html", align = "lr", , digits = 2,
+        caption = "Table 2.2: Sample overview of individual follow-up time, event status and age at inclusion (n = 8)") |> 
+  kable_classic(full_width = FALSE, html_font = "Cambria") |> 
+  footnote(general = "MI: Myocardial infarction. Event status is coded as 1 for individuals who experienced \nan MI during follow-up, and 0 for censored observations.\n
+  N = 1786
+  Total events = 348
+  Total person-years = 26161.2"
+  )
+```
+```{r person_years, message=FALSE, warning=FALSE, include=FALSE}
+py
+```
+
+**INTERPRETATION**
+
+Table 2.2 shows both the individual as well as the total amount of events, person-years, and age at inclusion (years). 
+
+**Events:**
+The total number of individuals who experienced the primary outcome, myocardial infarction (MI), during the follow-up period. The remaining 1,438 individuals did not experience an MI before the study ended or before they dropped out (censoring).
+
+**Person-years:**
+The cumulative amount of time all participants contributed while being active in the study and at risk of experiencing an MI. It is equivalent to following a single person for `r round(sum(py$pyears), 1)` years, or following the`r py$n` participants for an average of approximately `r round(sum(py$pyears) / py$n, 1)` years each (`r round(sum(py$pyears), 1)` person-years divided with `r py$n` individuals)
+
+**Age at inclusion:**
+Represents the precise age of the participants in years at baseline. 
+
+
+### 2.3. Definition of Smoker 
+
+The new binary variable $\text{smoker}$ is made from the variable $\text{smoking}$ by collapsing the five initial categories into two: 
+
+- *Current smoker:* <15 per day / >15 per day
+
+- *Non-smoker:* Never smoked / Ex>5 years / Ex 1-4 years
+
+```{r collapse_smoker,echo=FALSE}
+caer <- caer |> 
+  mutate(smoker = case_when(
+    smoking == "<15 per day" ~ "Current smoker",
+    smoking == ">15 per day" ~ "Current smoker",
+    .default = "Non-smoker"),
+    smoker = factor(smoker))
+
+# Print
+xtabs(~smoking + smoker, 
+      addNA = TRUE, data = caer) |> 
+  as.matrix() |> 
+  kable(format = "html", align = "rcc",
+        caption = "Table 2.3: Cross-tabulation of the original and recoded smoking variable") |> 
+  kable_classic(full_width = FALSE, html_font = "Cambria") |> 
+    add_header_above(c("Smoking (original)" = 1, 
+                       "Smoker (recoded)" = 2))
+```
+
+Table 2.3 shows, that the new variable $\text{smoker}$ is correctly collapsed from the original variable $\text{smoking}$. 
+
+
+### 2.4. Definition of BMI-group 
+
+The baseline dataset contains body mass index (BMI) as a continuous variable. To improve clinical interpretability, this variable was recoded into a categorical variable based on the standardized thresholds defined by the *World Health Organization (WHO)*:
+
+1. **Underweight / Low normal weight (<18.5):** Individuals with a low body weight.
+
+2. **Normal weight (18.5 – 24.9):** The ideal or reference weight range for adults.
+
+3. **Overweight (25.0 – 29.9):** Moderately elevated body weight (pre-obesity).
+
+4. **Obesity (>30.0):** Significantly elevated body weight (adipositas).
+
+For each of these newly established categories, the total sample size (\(n\)) along with the minimum and maximum observed values were calculated to validate the data distribution
+
+```{r bmi_group, echo=FALSE}
+caer <- caer |> 
+  mutate(bmi_group = cut(bmi, c(0, 18.5, 25, 30, 100), 
+                         labels = c("<18.5", "18.5 - 24.9", "25 - 29.9", ">30"), 
+                         right = FALSE),
+         bmi_group = factor(bmi_group),
+         bmi_group = fct_relevel(bmi_group, "<18.5"))
+
+# Print
+caer |> 
+  summarise(
+    "Amount (n)" = n(),
+    "Minimum BMI" = min(bmi, na.rm = TRUE),
+    "Maximum BMI" = max(bmi, na.rm = TRUE),
+    .by = bmi_group
+  ) |> 
+  arrange(bmi_group) |>
+  rename("BMI group" = bmi_group) |> 
+  kable(format = "html", align = "lrrr", digits = 2,
+        caption = "Table 2.4: Distribution and validation of categorised BMI groups") |> 
+  kable_classic(full_width = FALSE, html_font = "Cambria") |> 
+  footnote(general = "BMI is measured in kg/m²")
+```
+
+
+
+## 3. POISSON REGRESSION MODEL 
+
+A poisson regression model estimates the rate ratio (RR). 
+
+
+### 3.1 THE EFFECT OF SMOKING STATUS ON THE MI-RATE, ADJUSTED FOR BMI-GROUP
+
+To assess the effect of smoking on the MI-rate the reference group for the variable $\text{smoking}$ needs to be recoded so the reference is non-smokers.
+
+```{r recode_smoking, include=FALSE, warning=FALSE}
+caer <- caer |> 
+  mutate(smoker = fct_relevel(smoker, "Non-smoker"),
+         bmi_group = fct_relevel(bmi_group, "18.5 - 24.9"))
+```
+
+```{r smoke_bmi_group, message=FALSE, warning=FALSE, include=FALSE}
+table_1 <- list(
+  "Poisson" = glm(event ~ offset(log(pyears)) + smoker + bmi_group, family = poisson, data = caer)|> parameters(exponentiate = TRUE) |> as.data.frame()
+  ) |> 
+  bind_rows(.id = "Table 3.1: Poisson regression model") |> 
+  select("Table 3.1: Poisson regression model" = Parameter, 
+         Rate = Coefficient, CI_low, CI_high, p) |> 
+  mutate(
+    across(c(Rate, CI_low, CI_high), ~ round(.x, 2)),
+    p = case_when(
+      p < 0.001 ~ "< 0.001",
+      p < 0.05  ~ "< 0.05",
+      TRUE      ~ as.character(round(p, 3))
+    )
+  )
+
+table_1
+```
+
+```{r table_poisson, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+library(stargazer)
+
+## Models
+model   <- glm(event ~ offset(log(pyears)) + smoker + bmi_group, family = poisson, data = caer)
+
+## Transforming from log-odds to odds
+RR <- exp(coef(model))
+CI <- exp(confint(model))
+p  <- summary(model)$coefficients[, 4]
+
+## Table
+stargazer(model, 
+          type = "html",    
+          align = FALSE,
+          coef = list(RR), 
+          title = "Table 3.1: Poisson regression model",
+          ci = TRUE,                      
+          ci.custom = list(CI),    
+          p = list(p),           
+          dep.var.labels = "Event of MI (event)",
+          covariate.labels = c("Current Smoker", 
+                               "Underweight (<18.5)", "Overweight (25 - 29.9)", "Obesity (>30)",
+                               "Intercept"),
+          digits = 2,
+          star.cutoffs = c(0.05, 0.01, 0.001), 
+          keep.stat = c("n"),
+          notes.align = "l",
+          notes.append = TRUE,
+          notes = c("Reference group: A non-smoker measured to be in the BMI-group 18.5 - 24.9 (normal weight).")
+)
+```
+**INTERPRETATION**
+
+**Intercept:**
+The significant rate for a individual in the reference group per 1,000 person-years; `r table_1$Rate[1]` (95% CI: `r table_1$CI_low[1]`; `r table_1$CI_high[1]`, p `r table_1$p[1]`)
+
+**Smoker:**
+The rate for smokers are `r table_1$Rate[2]` (95% CI: `r table_1$CI_low[2]`; `r table_1$CI_high[2]`, p `r table_1$p[2]`) times significant higher to develop MI compared to non-smokers when adjusting for BMI-group. 
+
+**Underweight (<18.5):**
+The MI-rate is tending to be `r table_1$Rate[3]` (95% CI: `r table_1$CI_low[3]`; `r table_1$CI_high[3]`, p `r table_1$p[3]`) times lower for non-smoking individuals how is classified as being underweight compared to non-smoking individuals classified as being normal weight. This is not statistically significant. 
+
+**Overweight (25 - 29.9):**
+The MI-rate is `r table_1$Rate[4]` (95% CI: `r table_1$CI_low[4]`; `r table_1$CI_high[4]`, p `r table_1$p[4]`) times higher for non-smoking individuals how is classified as being overweight compared to non-smoking individuals classified as being normal weight. This is statistically significant. 
+
+**Obesity (>30):**
+Same as above...
+
+
+
+#### 3.1.1 EFFECT MODIFICATION
+
+
+
+
+
+
+
+
+
+
